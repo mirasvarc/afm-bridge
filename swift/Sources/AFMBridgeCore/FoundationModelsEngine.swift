@@ -1,5 +1,7 @@
+import CoreGraphics
 import Foundation
 import FoundationModels
+import ImageIO
 
 /// The real engine backed by Apple's FoundationModels framework.
 public struct FoundationModelsEngine: ModelEngine {
@@ -20,19 +22,18 @@ public struct FoundationModelsEngine: ModelEngine {
     return try await SystemLanguageModel.default.tokenCount(for: Prompt(text))
   }
 
-  public func makeSession(config: SessionConfig) async throws -> any EngineSession {
+  public func makeSession(config: SessionConfig, tools: [ToolSpec], toolHandler: any ToolHandler) async throws
+    -> any EngineSession
+  {
     try Self.requireOnDevice(config.model ?? .onDevice)
-    if let tools = config.tools, !tools.isEmpty {
-      throw RPCError.invalidParams(
-        "Tool calling is not implemented in this version of afm-bridge-server yet", path: "tools")
-    }
     let systemModel = SystemLanguageModel(
       useCase: config.useCase == .contentTagging ? .contentTagging : .general,
       guardrails: config.guardrails == .permissiveContentTransformations ? .permissiveContentTransformations : .default)
     if case .unavailable(let reason, let message) = Self.status(of: systemModel) {
       throw RPCError.modelUnavailable(model: .onDevice, reason: reason, message: message)
     }
-    let session = LanguageModelSession(model: systemModel, tools: [], instructions: config.instructions)
+    let dynamicTools: [any Tool] = tools.map { DynamicTool(spec: $0, handler: toolHandler) }
+    let session = LanguageModelSession(model: systemModel, tools: dynamicTools, instructions: config.instructions)
     return FoundationModelsSession(systemModel: systemModel, session: session)
   }
 
@@ -79,6 +80,24 @@ public struct FoundationModelsEngine: ModelEngine {
   }
 }
 
+/// A tool whose arguments and execution live on the client.
+struct DynamicTool: Tool {
+  typealias Arguments = GeneratedContent
+  typealias Output = String
+
+  let spec: ToolSpec
+  let handler: any ToolHandler
+
+  var name: String { spec.name }
+  var description: String { spec.description }
+  var parameters: GenerationSchema { spec.parameters.schema }
+  var includesSchemaInInstructions: Bool { spec.includeSchemaInInstructions }
+
+  func call(arguments: GeneratedContent) async throws -> String {
+    try await handler.callTool(name: spec.name, arguments: spec.parameters.normalize(JSON(arguments)))
+  }
+}
+
 struct FoundationModelsSession: EngineSession {
   let systemModel: SystemLanguageModel
   let session: LanguageModelSession
@@ -87,10 +106,20 @@ struct FoundationModelsSession: EngineSession {
   var contextSize: Int { systemModel.contextSize }
 
   func respond(
-    _ request: GenerationRequest, onSnapshot: (@Sendable (String) async -> Void)?
+    _ request: GenerationRequest, onSnapshot: (@Sendable (EngineSnapshot) async -> Void)?
   ) async throws -> GenerationResult {
     do {
-      return try await generate(request, onSnapshot: onSnapshot)
+      let prompt = try Self.buildPrompt(request.prompt)
+      let options = try Self.buildOptions(request.options)
+      let result =
+        if let schema = request.schema {
+          try await structured(prompt, options, schema, request, onSnapshot)
+        } else {
+          try await text(prompt, options, request, onSnapshot)
+        }
+      // The framework may finish a generation even though our task was cancelled.
+      try Task.checkCancellation()
+      return result
     } catch {
       var mapped = ErrorMapper.map(error)
       // macOS 27.0 still throws the legacy GenerationError for context overflow,
@@ -102,45 +131,84 @@ struct FoundationModelsSession: EngineSession {
     }
   }
 
-  private func generate(
-    _ request: GenerationRequest, onSnapshot: (@Sendable (String) async -> Void)?
+  private func text(
+    _ prompt: Prompt, _ options: GenerationOptions, _ request: GenerationRequest,
+    _ onSnapshot: (@Sendable (EngineSnapshot) async -> Void)?
   ) async throws -> GenerationResult {
-    let prompt = try Self.buildPrompt(request.prompt)
-    let options = try Self.buildOptions(request.options)
-    let result: GenerationResult
     if #available(macOS 27, *) {
-      let context = Self.buildContextOptions(request.options)
+      let context = Self.buildContextOptions(request.options, includeSchemaInPrompt: nil)
       if let onSnapshot {
         var last: LanguageModelSession.ResponseStream<String>.Snapshot?
         for try await snapshot in session.streamResponse(to: prompt, options: options, contextOptions: context) {
           try Task.checkCancellation()
-          await onSnapshot(snapshot.content)
+          await onSnapshot(EngineSnapshot(text: snapshot.content))
           last = snapshot
         }
-        result = GenerationResult(text: last?.content ?? "", usage: last.map { Self.usage($0.usage) })
-      } else {
-        let response = try await session.respond(to: prompt, options: options, contextOptions: context)
-        result = GenerationResult(text: response.content, usage: Self.usage(response.usage))
+        return GenerationResult(text: last?.content ?? "", usage: last.map { Self.usage($0.usage) })
       }
-    } else {
-      if request.options.reasoningLevel != nil {
-        throw RPCError.unsupportedOS(feature: "reasoningLevel", requiredVersion: "27.0")
-      }
-      if let onSnapshot {
-        var text = ""
-        for try await snapshot in session.streamResponse(to: prompt, options: options) {
-          try Task.checkCancellation()
-          await onSnapshot(snapshot.content)
-          text = snapshot.content
-        }
-        result = GenerationResult(text: text)
-      } else {
-        result = GenerationResult(text: try await session.respond(to: prompt, options: options).content)
-      }
+      let response = try await session.respond(to: prompt, options: options, contextOptions: context)
+      return GenerationResult(text: response.content, usage: Self.usage(response.usage))
     }
-    // The framework may finish a generation even though our task was cancelled.
-    try Task.checkCancellation()
-    return result
+    try Self.rejectMacOS27Options(request.options)
+    if let onSnapshot {
+      var text = ""
+      for try await snapshot in session.streamResponse(to: prompt, options: options) {
+        try Task.checkCancellation()
+        await onSnapshot(EngineSnapshot(text: snapshot.content))
+        text = snapshot.content
+      }
+      return GenerationResult(text: text)
+    }
+    return GenerationResult(text: try await session.respond(to: prompt, options: options).content)
+  }
+
+  private func structured(
+    _ prompt: Prompt, _ options: GenerationOptions, _ schema: ConvertedSchema, _ request: GenerationRequest,
+    _ onSnapshot: (@Sendable (EngineSnapshot) async -> Void)?
+  ) async throws -> GenerationResult {
+    func result(_ raw: GeneratedContent, _ usage: Usage?) -> GenerationResult {
+      let content = schema.normalize(JSON(raw))
+      return GenerationResult(text: content.serialized, content: content, usage: usage)
+    }
+    func snapshot(_ raw: GeneratedContent) -> EngineSnapshot {
+      let partial = JSON(raw)
+      return EngineSnapshot(text: partial.serialized, partial: partial)
+    }
+
+    if #available(macOS 27, *) {
+      let context = Self.buildContextOptions(request.options, includeSchemaInPrompt: request.includeSchemaInPrompt)
+      if let onSnapshot {
+        var last: LanguageModelSession.ResponseStream<GeneratedContent>.Snapshot?
+        for try await s in session.streamResponse(
+          to: prompt, schema: schema.schema, options: options, contextOptions: context)
+        {
+          try Task.checkCancellation()
+          await onSnapshot(snapshot(s.rawContent))
+          last = s
+        }
+        guard let last else { throw RPCError.internalError("The model produced no output") }
+        return result(last.rawContent, Self.usage(last.usage))
+      }
+      let response = try await session.respond(
+        to: prompt, schema: schema.schema, options: options, contextOptions: context)
+      return result(response.rawContent, Self.usage(response.usage))
+    }
+    try Self.rejectMacOS27Options(request.options)
+    if let onSnapshot {
+      var last: GeneratedContent?
+      for try await s in session.streamResponse(
+        to: prompt, schema: schema.schema, includeSchemaInPrompt: request.includeSchemaInPrompt, options: options)
+      {
+        try Task.checkCancellation()
+        await onSnapshot(snapshot(s.rawContent))
+        last = s.rawContent
+      }
+      guard let last else { throw RPCError.internalError("The model produced no output") }
+      return result(last, nil)
+    }
+    let response = try await session.respond(
+      to: prompt, schema: schema.schema, includeSchemaInPrompt: request.includeSchemaInPrompt, options: options)
+    return result(response.rawContent, nil)
   }
 
   func prewarm(promptPrefix: String?) {
@@ -161,16 +229,35 @@ struct FoundationModelsSession: EngineSession {
   // MARK: - Conversions
 
   static func buildPrompt(_ input: PromptInput) throws -> Prompt {
-    var texts: [String] = []
+    let texts = input.parts.compactMap { part -> String? in
+      if case .text(let t) = part { return t }
+      return nil
+    }
+    guard texts.count < input.parts.count else { return Prompt(texts.joined(separator: "\n\n")) }
+    guard #available(macOS 27, *) else {
+      throw RPCError.unsupportedOS(feature: "Image input", requiredVersion: "27.0")
+    }
+    var prompts: [Prompt] = []
     for (index, part) in input.parts.enumerated() {
       switch part {
-      case .text(let t): texts.append(t)
-      case .imagePath, .imageData:
-        throw RPCError.invalidParams(
-          "Image input is not implemented in this version of afm-bridge-server yet", path: "prompt/\(index)")
+      case .text(let t):
+        prompts.append(Prompt(t))
+      case .imagePath(let path):
+        guard FileManager.default.isReadableFile(atPath: path) else {
+          throw RPCError.invalidParams("Image file not found or not readable: \(path)", path: "prompt/\(index)/path")
+        }
+        prompts.append(Prompt(Attachment(imageURL: URL(fileURLWithPath: path))))
+      case .imageData(let base64, _):
+        guard let data = Data(base64Encoded: base64, options: .ignoreUnknownCharacters),
+          let source = CGImageSourceCreateWithData(data as CFData, nil),
+          let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else {
+          throw RPCError.invalidParams("Image data is not a decodable base64 image", path: "prompt/\(index)/data")
+        }
+        prompts.append(Prompt(Attachment(image)))
       }
     }
-    return Prompt(texts.joined(separator: "\n\n"))
+    return Prompt(prompts)
   }
 
   static func buildOptions(_ input: GenerationOptionsInput) throws -> GenerationOptions {
@@ -197,8 +284,14 @@ struct FoundationModelsSession: EngineSession {
     return o
   }
 
+  static func rejectMacOS27Options(_ input: GenerationOptionsInput) throws {
+    if input.reasoningLevel != nil {
+      throw RPCError.unsupportedOS(feature: "reasoningLevel", requiredVersion: "27.0")
+    }
+  }
+
   @available(macOS 27, *)
-  static func buildContextOptions(_ input: GenerationOptionsInput) -> ContextOptions {
+  static func buildContextOptions(_ input: GenerationOptionsInput, includeSchemaInPrompt: Bool?) -> ContextOptions {
     let level: ContextOptions.ReasoningLevel? =
       switch input.reasoningLevel {
       case .none: nil
@@ -206,7 +299,7 @@ struct FoundationModelsSession: EngineSession {
       case .moderate: .moderate
       case .deep: .deep
       }
-    return ContextOptions(reasoningLevel: level)
+    return ContextOptions(includeSchemaInPrompt: includeSchemaInPrompt, reasoningLevel: level)
   }
 
   @available(macOS 27, *)

@@ -14,3 +14,7 @@ examples/electron/out/
 examples/electron/vendor/
 examples/electron/package-lock.json
 examples/tauri/dist/
+
+# Markdown documents in the repository root, except the README
+/*.md
+!/README.md

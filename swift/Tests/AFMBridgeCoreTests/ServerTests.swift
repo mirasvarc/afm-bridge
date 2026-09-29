@@ -39,26 +39,38 @@ final class ExitRecorder: @unchecked Sendable {
 struct FakeSession: EngineSession {
   enum Behavior: Sendable {
     case snapshots([String])
+    /// Streams these partial values and returns the last one as structured content.
+    case partials([JSON])
     case hangUntilCancelled
     case fail(RPCError)
+    /// Calls the named tool with the arguments and answers "tool said: <output>".
+    case callTool(String, JSON)
   }
 
   var behavior: Behavior
+  var toolHandler: any ToolHandler
   var model: ModelId { .onDevice }
   var contextSize: Int { 4096 }
 
   func respond(
-    _ request: GenerationRequest, onSnapshot: (@Sendable (String) async -> Void)?
+    _ request: GenerationRequest, onSnapshot: (@Sendable (EngineSnapshot) async -> Void)?
   ) async throws -> GenerationResult {
+    let usage = Usage(inputTokens: 5, cachedInputTokens: 0, outputTokens: 3, reasoningTokens: 0)
     switch behavior {
     case .snapshots(let snaps):
-      for s in snaps { await onSnapshot?(s) }
-      return GenerationResult(
-        text: snaps.last ?? "", usage: Usage(inputTokens: 5, cachedInputTokens: 0, outputTokens: 3, reasoningTokens: 0))
+      for s in snaps { await onSnapshot?(EngineSnapshot(text: s)) }
+      return GenerationResult(text: snaps.last ?? "", usage: usage)
+    case .partials(let values):
+      for v in values { await onSnapshot?(EngineSnapshot(text: v.serialized, partial: v)) }
+      let content = request.schema.map { $0.normalize(values.last ?? .null) } ?? values.last
+      return GenerationResult(text: content?.serialized ?? "", content: content, usage: usage)
     case .hangUntilCancelled:
       while true { try await Task.sleep(for: .milliseconds(10)) }
     case .fail(let e):
       throw e
+    case .callTool(let name, let arguments):
+      let output = try await toolHandler.callTool(name: name, arguments: arguments)
+      return GenerationResult(text: "tool said: \(output)")
     }
   }
 
@@ -66,9 +78,15 @@ struct FakeSession: EngineSession {
   func info() async -> SessionInfo { SessionInfo(contextSize: 4096, historyTokenCount: 12) }
 }
 
+actor ToolRecorder {
+  private(set) var tools: [[ToolSpec]] = []
+  func record(_ t: [ToolSpec]) { tools.append(t) }
+}
+
 struct FakeEngine: ModelEngine {
   var behavior: FakeSession.Behavior = .snapshots(["Hel", "Hello", "Hello!"])
   var available = true
+  var recorder = ToolRecorder()
 
   func status(model: ModelId) async -> ModelStatus {
     model == .onDevice && available
@@ -78,11 +96,14 @@ struct FakeEngine: ModelEngine {
 
   func tokenCount(model: ModelId, text: String) async throws -> Int { text.split(separator: " ").count }
 
-  func makeSession(config: SessionConfig) async throws -> any EngineSession {
+  func makeSession(config: SessionConfig, tools: [ToolSpec], toolHandler: any ToolHandler) async throws
+    -> any EngineSession
+  {
     guard available else {
       throw RPCError.modelUnavailable(model: .onDevice, reason: .appleIntelligenceNotEnabled, message: "off")
     }
-    return FakeSession(behavior: behavior)
+    await recorder.record(tools)
+    return FakeSession(behavior: behavior, toolHandler: toolHandler)
   }
 }
 
@@ -99,7 +120,7 @@ struct Harness {
   }
 
   func send(_ id: Int?, _ method: String, _ params: JSON = [:]) async {
-    var m: [String: JSON] = ["jsonrpc": "2.0", "method": .string(method), "params": params]
+    var m: JSONObject = ["jsonrpc": "2.0", "method": .string(method), "params": params]
     if let id { m["id"] = .int(id) }
     await server.handle(line: MessageEncoder.line(.object(m)))
   }

@@ -414,7 +414,7 @@ describe('process lifecycle', () => {
   it('answers unknown server requests with methodNotFound', async () => {
     const { transport, afm } = setup()
     await afm.serverInfo()
-    transport.current.emit({ jsonrpc: '2.0', id: 's:1', method: 'tool/call', params: {} })
+    transport.current.emit({ jsonrpc: '2.0', id: 's:1', method: 'future/method', params: {} })
     await until(() => transport.current.received.some((m) => m.id === 's:1'))
     const reply = transport.current.received.find((m) => m.id === 's:1')
     expect(reply.error.data.type).toBe('methodNotFound')

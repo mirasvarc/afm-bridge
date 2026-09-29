@@ -1,8 +1,17 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
-import { AbortError, AppleFoundationModels, ContextWindowExceededError } from '../src/index.js'
+import { z } from 'zod'
+import {
+  AbortError,
+  AppleFoundationModels,
+  ContextWindowExceededError,
+  ToolExecutionError,
+  tool,
+  UnsupportedSchemaError,
+} from '../src/index.js'
 import { NodeStdioTransport } from '../src/node/index.js'
+import { zodSchema } from '../src/zod/index.js'
 
 // Runs against the real on-device model. Enable with AFM_INTEGRATION=1.
 // Uses AFM_BRIDGE_BINARY, or the release/debug build in swift/.build.
@@ -73,5 +82,101 @@ describe.runIf(enabled)('integration with the real model', { timeout: 120_000 },
 
   it('counts tokens', async () => {
     await expect(afm.tokenCount('Hello world')).resolves.toBeGreaterThan(0)
+  })
+
+  it('returns structured output that validates against a Zod schema', async () => {
+    const session = await afm.createSession()
+    const Person = z.object({
+      name: z.string(),
+      age: z.number().int().min(0).max(120),
+      nickname: z.string().nullable(),
+      role: z.enum(['admin', 'user']),
+      hobbies: z.array(z.string()).min(1).max(3),
+      email: z.string().email(),
+    })
+    const person = await session.respond('Invent a fictional user.', { schema: zodSchema(Person) })
+    expect(Person.parse(person)).toEqual(person)
+    expect(Object.keys(person)).toEqual(['name', 'age', 'nickname', 'role', 'hobbies', 'email'])
+  })
+
+  it('streams partial structured values', async () => {
+    const session = await afm.createSession()
+    const schema = zodSchema(z.object({ title: z.string(), steps: z.array(z.string()).max(3) }))
+    const partials: unknown[] = []
+    let final: unknown
+    for await (const chunk of session.stream('A short recipe for tea.', { schema })) {
+      if (chunk.done) final = chunk.content
+      else partials.push(chunk.partial)
+    }
+    expect(partials.length).toBeGreaterThan(1)
+    expect(final).toMatchObject({ title: expect.any(String), steps: expect.any(Array) })
+  })
+
+  it('rejects a pattern the model cannot handle with UnsupportedSchemaError', async () => {
+    const session = await afm.createSession()
+    const error = await session
+      .respond('x', {
+        schema: {
+          type: 'object',
+          properties: { code: { type: 'string', pattern: '[a-z]+' } },
+          required: ['code'],
+        },
+      })
+      .catch((e) => e)
+    expect(error).toBeInstanceOf(UnsupportedSchemaError)
+  })
+
+  it('calls a JavaScript tool and uses its result', async () => {
+    const calls: string[] = []
+    const session = await afm.createSession({
+      instructions: 'Use tools when they help. Answer briefly.',
+      tools: [
+        tool({
+          name: 'getWeather',
+          description: 'Get the current weather for a city',
+          parameters: zodSchema(z.object({ city: z.string().describe('City name') })),
+          execute: ({ city }) => {
+            calls.push(city)
+            return { city, temperatureC: 17, condition: 'foggy' }
+          },
+        }),
+      ],
+    })
+    const answer = await session.respond('What is the weather in Prague right now?')
+    expect(calls.map((c) => c.toLowerCase())).toContain('prague')
+    expect(answer.toLowerCase()).toMatch(/17|fog/)
+  })
+
+  it('fails the generation with ToolExecutionError when a tool throws', async () => {
+    const session = await afm.createSession({
+      tools: [
+        tool({
+          name: 'getBalance',
+          description: "Look up the user's account balance",
+          parameters: { type: 'object', properties: {} },
+          execute: () => {
+            throw new Error('database offline')
+          },
+        }),
+      ],
+    })
+    const error = await session.respond('What is my account balance? Use the tool.').catch((e) => e)
+    expect(error).toBeInstanceOf(ToolExecutionError)
+    expect(error.message).toContain('database offline')
+  })
+
+  it('understands an image given as a path or as base64 data', async () => {
+    const path = fileURLToPath(new URL('./fixtures/red.png', import.meta.url))
+    const question = 'What single color fills this image? Answer with one word.'
+    const fromPath = await (await afm.createSession()).respond([
+      { type: 'text', text: question },
+      { type: 'image', path },
+    ])
+    const fromData = await (await afm.createSession()).respond([
+      { type: 'text', text: question },
+      { type: 'image', data: readFileSync(path).toString('base64'), mimeType: 'image/png' },
+    ])
+    expect(fromPath.toLowerCase()).toContain('red')
+    expect(fromData.toLowerCase()).toContain('red')
   })
 })

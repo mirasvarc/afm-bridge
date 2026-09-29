@@ -3,9 +3,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node chat.mjs"
+    "start": "node chat.mjs",
+    "structured": "node structured.mjs",
+    "tools": "node tools.mjs"
   },
   "dependencies": {
-    "afm-bridge": "workspace:*"
+    "afm-bridge": "workspace:*",
+    "zod": "^4.6.5"
   }
 }

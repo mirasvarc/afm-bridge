@@ -10,6 +10,10 @@ export interface RespondContext {
   /** Aborted when the client sends `cancel` for this request. */
   signal: AbortSignal
   process: MockProcess
+  /** Sends `tool/call` to the client and resolves with its result (or rejects with its error). */
+  callTool(name: string, args: Json): Promise<Json>
+  /** Sends a `partial` delta (structured streaming). */
+  partial(value: Json): void
 }
 
 export interface MockBehavior {
@@ -56,6 +60,8 @@ export class MockProcess {
   private nextSession = 1
   private readonly sessions = new Set<string>()
   private readonly running = new Map<number, AbortController>()
+  private readonly outgoing = new Map<string, { resolve(v: Json): void; reject(e: Json): void }>()
+  private nextOutgoing = 1
 
   readonly connection: Connection
 
@@ -105,6 +111,13 @@ export class MockProcess {
     if (!this.alive) return
     this.received.push(message)
     const { id, method, params } = message
+    if (method === undefined && typeof id === 'string') {
+      const pending = this.outgoing.get(id)
+      this.outgoing.delete(id)
+      if ('error' in message) pending?.reject(message.error)
+      else pending?.resolve(message.result)
+      return
+    }
     switch (method) {
       case 'initialize':
         if (this.behavior.silentInitialize) return
@@ -182,6 +195,24 @@ export class MockProcess {
         this.emit({ jsonrpc: '2.0', method: 'session/delta', params: { requestId: id, reset: true, text } }),
       signal: controller.signal,
       process: this,
+      partial: (value) =>
+        params.stream &&
+        this.emit({ jsonrpc: '2.0', method: 'session/delta', params: { requestId: id, partial: value } }),
+      callTool: (name, args) => {
+        const callId = `s:${this.nextOutgoing++}`
+        const result = new Promise<Json>((resolve, reject) => this.outgoing.set(callId, { resolve, reject }))
+        controller.signal.addEventListener('abort', () => {
+          if (this.outgoing.delete(callId))
+            this.emit({ jsonrpc: '2.0', method: 'cancel', params: { id: callId } })
+        })
+        this.emit({
+          jsonrpc: '2.0',
+          id: callId,
+          method: 'tool/call',
+          params: { sessionId: params.sessionId, requestId: id, callId, name, arguments: args },
+        })
+        return result
+      },
     }
     const cancelled = new Promise<never>((_, reject) =>
       controller.signal.addEventListener('abort', () => reject(new Error('cancelled'))),

@@ -27,7 +27,7 @@ public enum ModelStatus: Sendable, Equatable {
   public var json: JSON {
     switch self {
     case .available(let contextSize, let variant, let capabilities, let languages):
-      var o: [String: JSON] = [
+      var o: JSONObject = [
         "available": true,
         "contextSize": .int(contextSize),
         "capabilities": .array(capabilities.map { .string($0) }),
@@ -185,20 +185,19 @@ public enum UseCase: String, Sendable, Decodable {
   case general, contentTagging
 }
 
+/// `session/create` params except `tools`, which are read from the ordered JSON tree
+/// (Codable would lose the property order of their schemas).
 public struct SessionConfig: Sendable, Decodable {
   public var model: ModelId?
   public var instructions: String?
-  public var tools: [JSON]?
   public var guardrails: Guardrails?
   public var useCase: UseCase?
 
   public init(
-    model: ModelId? = nil, instructions: String? = nil, tools: [JSON]? = nil, guardrails: Guardrails? = nil,
-    useCase: UseCase? = nil
+    model: ModelId? = nil, instructions: String? = nil, guardrails: Guardrails? = nil, useCase: UseCase? = nil
   ) {
     self.model = model
     self.instructions = instructions
-    self.tools = tools
     self.guardrails = guardrails
     self.useCase = useCase
   }
@@ -208,7 +207,7 @@ struct RespondParams: Decodable {
   var sessionId: String
   var prompt: PromptInput
   var options: GenerationOptionsInput?
-  var schema: JSON?
+  // `schema` is read from the ordered JSON tree.
   var includeSchemaInPrompt: Bool?
   var stream: Bool?
 }

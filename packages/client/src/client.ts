@@ -1,4 +1,5 @@
 import {
+  AfmError,
   ClientClosedError,
   ModelUnavailableError,
   ProtocolError,
@@ -8,6 +9,7 @@ import {
 } from './errors.js'
 import { type RequestOptions, RpcPeer } from './rpc.js'
 import { type DeltaParams, Session, type SessionHost } from './session.js'
+import { runTool, type Tool, toolDefinition } from './tool.js'
 import type { CloseInfo, Connection, Transport } from './transport.js'
 import type { CallOptions, ModelId, ModelStatus, ServerInfo, SessionOptions } from './types.js'
 
@@ -48,6 +50,8 @@ interface Slot {
   intentional: boolean
   exited?: CloseInfo
   listeners: Map<number, (params: DeltaParams) => void>
+  /** Tools by session id, then by name. */
+  tools: Map<string, Map<string, Tool<unknown>>>
 }
 
 const LOG_TAIL = 20
@@ -82,6 +86,9 @@ export class AppleFoundationModels {
         const slot = this.live?.epoch === epoch ? this.live.slot : undefined
         slot?.listeners.set(requestId, listener)
         return () => slot?.listeners.delete(requestId)
+      },
+      disposed: (epoch, sessionId) => {
+        if (this.live?.epoch === epoch) this.live.slot.tools.delete(sessionId)
       },
     }
   }
@@ -120,13 +127,14 @@ export class AppleFoundationModels {
   /** Creates a conversation. Throws `ModelUnavailableError` (with `reason`) when the model cannot be used. */
   async createSession(options: SessionOptions = {}): Promise<Session> {
     const live = await this.connect()
-    const { signal, ...params } = options
+    const { signal, tools, ...params } = options
     const result = await this.requestInEpoch<{ sessionId: string; contextSize: number }>(
       live.epoch,
       'session/create',
-      params,
+      tools?.length ? { ...params, tools: tools.map(toolDefinition) } : params,
       { signal },
     )
+    if (tools?.length) live.slot.tools.set(result.sessionId, new Map(tools.map((t) => [t.name, t])))
     return new Session(
       this.host,
       live.epoch,
@@ -205,7 +213,7 @@ export class AppleFoundationModels {
     }
 
     const epoch = ++this.epoch
-    const slot: Slot = { intentional: false, listeners: new Map() }
+    const slot: Slot = { intentional: false, listeners: new Map(), tools: new Map() }
     const connection = await this.transport.connect({
       onMessage: (line) => slot.peer?.handleLine(line),
       onLog: (line) => {
@@ -222,6 +230,19 @@ export class AppleFoundationModels {
           const p = params as DeltaParams
           slot.listeners.get(p.requestId)?.(p)
         }
+      },
+      onRequest: async (method, params, signal) => {
+        if (method !== 'tool/call') {
+          throw new AfmError(`Method not found: ${method}`, { type: 'methodNotFound', code: -32601 })
+        }
+        const {
+          sessionId,
+          name,
+          arguments: args,
+        } = params as { sessionId: string; name: string; arguments: unknown }
+        const found = slot.tools.get(sessionId)?.get(name)
+        if (!found) throw new AfmError(`Unknown tool '${name}'`, { type: 'toolNotFound', code: -32000 })
+        return runTool(found, args, { signal, sessionId })
       },
       onPendingChange: (count) => connection.setActive?.(count > 0),
       onProtocolError: (error) => this.options.onLog?.(`[afm-bridge client] ${error.message}`),

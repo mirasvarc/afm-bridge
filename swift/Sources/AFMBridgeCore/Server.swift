@@ -35,6 +35,9 @@ public actor Server {
   private var initialized = false
   private var sessions: [String: SessionEntry] = [:]
   private var tasks: [RequestID: Task<Void, Never>] = [:]
+  /// Requests sent to the client (`tool/call`) that wait for an answer.
+  private var outgoing: [RequestID: PendingCall] = [:]
+  private var nextOutgoingId = 1
 
   public init(engine: any ModelEngine, sink: any MessageSink, onExit: @escaping @Sendable (Int32) -> Void) {
     self.engine = engine
@@ -53,8 +56,8 @@ public actor Server {
       await sink.send(MessageEncoder.error(id: failure.id, failure.error))
     case .success(.notification(let method, let params)):
       handleNotification(method: method, params: params)
-    case .success(.response(let id, _)):
-      Log.debug("ignoring response to unknown server request \(id)")
+    case .success(.response(let id, let result)):
+      resolveOutgoing(id, result)
     case .success(.request(let id, let method, let params)):
       await handleRequest(id: id, method: method, params: params)
     }
@@ -78,6 +81,7 @@ public actor Server {
       }
       Log.debug("cancel request \(p.id)")
       tasks[p.id]?.cancel()
+      cancelOutgoing(parent: p.id)
     default:
       Log.debug("ignoring unknown notification \(method)")
     }
@@ -139,6 +143,66 @@ public actor Server {
 
   private func cancelAll() {
     for task in tasks.values { task.cancel() }
+    for id in outgoing.keys { cancelOutgoing(id, notifyClient: false) }
+  }
+
+  // MARK: - Requests to the client
+
+  /// Asks the client to run a tool on behalf of the running `session/respond` of `sessionId`.
+  func callTool(sessionId: String, name: String, arguments: JSON) async throws -> String {
+    let parent = sessions[sessionId]?.activeRequest
+    let callId = "c\(nextOutgoingId)"
+    let result = try await callClient(
+      method: "tool/call", parent: parent,
+      params: [
+        "sessionId": .string(sessionId), "requestId": parent?.json ?? .null, "callId": .string(callId),
+        "name": .string(name), "arguments": arguments,
+      ])
+    guard let output = result["output"]?.stringValue else {
+      throw ToolFailure(message: "Tool '\(name)' returned no 'output' string")
+    }
+    return output
+  }
+
+  private func callClient(method: String, parent: RequestID?, params: JSON) async throws -> JSON {
+    let id = RequestID.string("s:\(nextOutgoingId)")
+    nextOutgoingId += 1
+    let pending = PendingCall(parent: parent)
+    outgoing[id] = pending
+    // The answer may be handled while we are suspended in `send`; PendingCall buffers it.
+    await sink.send(MessageEncoder.request(id: id, method: method, params: params))
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        if let result = pending.result {
+          continuation.resume(with: result)
+        } else {
+          pending.continuation = continuation
+        }
+      }
+    } onCancel: {
+      Task { await self.cancelOutgoing(id) }
+    }
+  }
+
+  private func resolveOutgoing(_ id: RequestID, _ result: Result<JSON, RPCError>) {
+    guard let pending = outgoing.removeValue(forKey: id) else {
+      Log.debug("ignoring response to unknown server request \(id)")
+      return
+    }
+    pending.complete(result.mapError { ToolFailure(message: $0.message) as any Error })
+  }
+
+  private func cancelOutgoing(_ id: RequestID, notifyClient: Bool = true) {
+    guard let pending = outgoing.removeValue(forKey: id) else { return }
+    if notifyClient {
+      let sink = self.sink
+      Task { await sink.send(MessageEncoder.notification(method: "cancel", params: ["id": id.json])) }
+    }
+    pending.complete(.failure(CancellationError()))
+  }
+
+  private func cancelOutgoing(parent: RequestID) {
+    for (id, pending) in outgoing where pending.parent == parent { cancelOutgoing(id) }
   }
 
   private func decode<T: Decodable>(_ type: T.Type, _ params: JSON) throws -> T {
@@ -167,43 +231,41 @@ public actor Server {
 
     case "session/create":
       let p = try decode(SessionConfig.self, params)
+      let tools = try Self.parseTools(params["tools"])
+      let sessionId = UUID().uuidString.lowercased()
+      let handler = SessionToolHandler(server: self, sessionId: sessionId)
       return {
-        let session = try await engine.makeSession(config: p)
-        let sessionId = UUID().uuidString.lowercased()
+        let session = try await engine.makeSession(config: p, tools: tools, toolHandler: handler)
         await self.register(sessionId, session)
         return ["sessionId": .string(sessionId), "contextSize": .int(session.contextSize)]
       }
 
     case "session/respond":
       let p = try decode(RespondParams.self, params)
-      if p.schema != nil {
-        throw RPCError.invalidParams("Structured output is not implemented in this version yet", path: "schema")
-      }
+      let schema = try params["schema"].map { try JSONSchemaConverter.convert($0) }
       var entry = try session(p.sessionId)
       guard entry.activeRequest == nil else { throw RPCError.sessionBusy(p.sessionId) }
       entry.activeRequest = id
       sessions[p.sessionId] = entry
       let session = entry.session
-      let request = GenerationRequest(prompt: p.prompt, options: p.options ?? .init())
+      let request = GenerationRequest(
+        prompt: p.prompt, options: p.options ?? .init(), schema: schema,
+        includeSchemaInPrompt: p.includeSchemaInPrompt ?? true)
       let sink = self.sink
       return {
-        let onSnapshot: (@Sendable (String) async -> Void)?
+        let onSnapshot: (@Sendable (EngineSnapshot) async -> Void)?
         if p.stream == true {
           let tracker = TrackerBox()
           onSnapshot = { snapshot in
-            guard let event = await tracker.update(snapshot) else { return }
-            let params: JSON =
-              switch event {
-              case .delta(let d): ["requestId": id.json, "delta": .string(d)]
-              case .reset(let t): ["requestId": id.json, "reset": true, "text": .string(t)]
-              }
+            guard let params = await tracker.update(snapshot, requestId: id) else { return }
             await sink.send(MessageEncoder.notification(method: "session/delta", params: params))
           }
         } else {
           onSnapshot = nil
         }
         let result = try await session.respond(request, onSnapshot: onSnapshot)
-        var o: [String: JSON] = ["text": .string(result.text)]
+        var o: JSONObject = ["text": .string(result.text)]
+        if let content = result.content { o["content"] = content }
         if let usage = result.usage { o["usage"] = usage.json }
         return .object(o)
       }
@@ -223,7 +285,7 @@ public actor Server {
       let isResponding = entry.activeRequest != nil
       return {
         let info = await session.info()
-        var o: [String: JSON] = [
+        var o: JSONObject = [
           "model": .string(session.model.rawValue), "contextSize": .int(info.contextSize),
           "isResponding": .bool(isResponding),
         ]
@@ -234,7 +296,10 @@ public actor Server {
 
     case "session/dispose":
       let p = try decode(SessionIdParams.self, params)
-      if let active = sessions[p.sessionId]?.activeRequest { tasks[active]?.cancel() }
+      if let active = sessions[p.sessionId]?.activeRequest {
+        tasks[active]?.cancel()
+        cancelOutgoing(parent: active)
+      }
       sessions[p.sessionId] = nil
       return { [:] }
 
@@ -247,8 +312,59 @@ public actor Server {
     sessions[id] = SessionEntry(session: session)
   }
 
+  /// `^[a-zA-Z_][a-zA-Z0-9_]{0,63}$`
+  static func isValidToolName(_ name: String) -> Bool {
+    let isASCIILetter: (Character) -> Bool = { $0.isASCII && $0.isLetter }
+    guard let first = name.first, name.count <= 64, isASCIILetter(first) || first == "_" else { return false }
+    return name.allSatisfy { isASCIILetter($0) || ($0.isASCII && $0.isNumber) || $0 == "_" }
+  }
+
+  /// Reads `session/create` tools from the ordered JSON tree and converts their schemas.
+  static func parseTools(_ json: JSON?) throws -> [ToolSpec] {
+    guard let json else { return [] }
+    guard case .array(let list) = json else { throw RPCError.invalidParams("'tools' must be an array", path: "tools") }
+    var specs: [ToolSpec] = []
+    for (i, tool) in list.enumerated() {
+      let path = "tools/\(i)"
+      guard let name = tool["name"]?.stringValue, isValidToolName(name) else {
+        throw RPCError.invalidParams(
+          "Tool name must match ^[a-zA-Z_][a-zA-Z0-9_]{0,63}$", path: "\(path)/name")
+      }
+      guard !specs.contains(where: { $0.name == name }) else {
+        throw RPCError.invalidParams("Duplicate tool name '\(name)'", path: "\(path)/name")
+      }
+      guard let description = tool["description"]?.stringValue else {
+        throw RPCError.invalidParams("Tool '\(name)' needs a 'description' string", path: "\(path)/description")
+      }
+      guard let parameters = tool["parameters"] else {
+        throw RPCError.invalidParams("Tool '\(name)' needs 'parameters'", path: "\(path)/parameters")
+      }
+      let converted: ConvertedSchema
+      do {
+        converted = try JSONSchemaConverter.convert(parameters, rootName: "\(name)_arguments", requireObject: true)
+      } catch var error as RPCError {
+        let inner = error.data["path"]?.stringValue ?? "#"
+        let pointer = "\(path)/parameters" + (inner == "#" ? "" : inner)
+        error.data["path"] = .string(pointer)
+        error.message = "Tool '\(name)': \(error.message)"
+        throw error
+      }
+      var include = true
+      if let flag = tool["includeSchemaInInstructions"] {
+        guard case .bool(let b) = flag else {
+          throw RPCError.invalidParams(
+            "'includeSchemaInInstructions' must be a boolean", path: "\(path)/includeSchemaInInstructions")
+        }
+        include = b
+      }
+      specs.append(
+        ToolSpec(name: name, description: description, parameters: converted, includeSchemaInInstructions: include))
+    }
+    return specs
+  }
+
   private static func initializeResult(engine: any ModelEngine) async throws -> JSON {
-    var models: [String: JSON] = [:]
+    var models = JSONObject()
     for model in ModelId.allCases {
       models[model.rawValue] = await engine.status(model: model).json
     }
@@ -287,8 +403,56 @@ public actor Server {
   }
 }
 
-/// Holds a `DeltaTracker` across the async snapshot callbacks of one request.
+/// Turns snapshots of one request into `session/delta` params (deltas for text,
+/// whole partial values for structured output).
 private actor TrackerBox {
   private var tracker = DeltaTracker()
-  func update(_ snapshot: String) -> DeltaTracker.Event? { tracker.update(snapshot) }
+  private var lastPartial: JSON?
+
+  func update(_ snapshot: EngineSnapshot, requestId: RequestID) -> JSON? {
+    if let partial = snapshot.partial {
+      guard partial != lastPartial else { return nil }
+      lastPartial = partial
+      return ["requestId": requestId.json, "partial": partial]
+    }
+    switch tracker.update(snapshot.text) {
+    case .none: return nil
+    case .delta(let d): return ["requestId": requestId.json, "delta": .string(d)]
+    case .reset(let t): return ["requestId": requestId.json, "reset": true, "text": .string(t)]
+    }
+  }
+}
+
+/// Routes tool calls of one session to the client.
+private struct SessionToolHandler: ToolHandler {
+  let server: Server
+  let sessionId: String
+
+  func callTool(name: String, arguments: JSON) async throws -> String {
+    try await server.callTool(sessionId: sessionId, name: name, arguments: arguments)
+  }
+}
+
+/// A tool call the client answered with an error; FoundationModels wraps it in `ToolCallError`.
+struct ToolFailure: LocalizedError, Sendable {
+  var message: String
+  var errorDescription: String? { message }
+}
+
+/// A request to the client waiting for its answer. Only touched on the server actor.
+private final class PendingCall: @unchecked Sendable {
+  let parent: RequestID?
+  var result: Result<JSON, any Error>?
+  var continuation: CheckedContinuation<JSON, any Error>?
+
+  init(parent: RequestID?) { self.parent = parent }
+
+  func complete(_ result: Result<JSON, any Error>) {
+    if let continuation {
+      self.continuation = nil
+      continuation.resume(with: result)
+    } else if self.result == nil {
+      self.result = result
+    }
+  }
 }

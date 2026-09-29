@@ -1,3 +1,6 @@
+import type { DeepPartial, SchemaInput } from './schema.js'
+import type { Tool } from './tool.js'
+
 /** Which model to use. `private-cloud` is reserved; see PROTOCOL.md section 10. */
 export type ModelId = 'on-device' | 'private-cloud'
 
@@ -76,6 +79,9 @@ export interface SessionOptions {
   instructions?: string
   guardrails?: 'default' | 'permissiveContentTransformations'
   useCase?: 'general' | 'contentTagging'
+  /** Functions the model may call while responding. */
+  // biome-ignore lint/suspicious/noExplicitAny: tools with different argument types
+  tools?: Array<Tool<any>>
   signal?: AbortSignal
 }
 
@@ -86,7 +92,26 @@ export interface CallOptions {
   timeoutMs?: number
 }
 
-export type RespondOptions = GenerationOptions & CallOptions
+export type RespondOptions = GenerationOptions &
+  CallOptions & {
+    /** Whether the schema is also described in the prompt (default true). Only with `schema`. */
+    includeSchemaInPrompt?: boolean
+  }
+
+/** Options that request structured output: the response is parsed and validated as `T`. */
+export type StructuredOptions<T> = RespondOptions & { schema: SchemaInput<T> }
+
+export interface StructuredResult<T> {
+  /** Parsed and validated value. */
+  content: T
+  /** The same value as JSON text. */
+  text: string
+  usage?: Usage
+}
+
+export type StructuredStreamChunk<T> =
+  | { done: false; partial: DeepPartial<T> }
+  | { done: true; content: T; text: string; usage?: Usage }
 
 export interface GenerateResult {
   text: string

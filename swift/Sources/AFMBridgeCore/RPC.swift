@@ -60,8 +60,8 @@ public struct RPCError: Error, Sendable, Equatable {
   }
 
   public var json: JSON {
-    var d = data
-    d["type"] = .string(type)
+    var d: JSONObject = ["type": .string(type)]
+    for key in data.keys.sorted() { d[key] = data[key] }
     return ["code": .int(code), "message": .string(message), "data": .object(d)]
   }
 }
@@ -139,9 +139,7 @@ public enum MessageParser {
   /// Parses one NDJSON line. On failure returns the error to send back, with the
   /// request ID when it could be recovered.
   public static func parse(_ line: String) -> Result<IncomingMessage, ParseFailure> {
-    guard let data = line.data(using: .utf8),
-      let json = try? JSONDecoder().decode(JSON.self, from: data)
-    else {
+    guard let json = try? JSON.parse(line) else {
       return .failure(ParseFailure(nil, .parseError("Invalid JSON")))
     }
     guard case .object(let obj) = json else {
@@ -171,7 +169,7 @@ public enum MessageParser {
       let code: Int = if case .int(let c) = error["code"] { c } else { -32603 }
       let message = error["message"]?.stringValue ?? "Unknown error"
       var data: [String: JSON] = [:]
-      if case .object(let d) = error["data"] { data = d }
+      if let d = error["data"]?.objectValue { data = d.dictionary }
       let type = data.removeValue(forKey: "type")?.stringValue ?? "unknown"
       return .success(
         .response(id: id, result: .failure(RPCError(code: code, type: type, message: message, data: data))))
@@ -199,8 +197,7 @@ public enum MessageEncoder {
 
   /// Serializes a message to a single line (without the trailing newline).
   public static func line(_ message: JSON) -> String {
-    // JSONEncoder never emits literal newlines without `.prettyPrinted`.
-    let data = (try? JSONCoding.encoder().encode(message)) ?? Data("{}".utf8)
-    return String(decoding: data, as: UTF8.self)
+    // The serializer escapes control characters, so the result never contains a newline.
+    message.serialized
   }
 }
