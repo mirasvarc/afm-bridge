@@ -1,0 +1,23 @@
+{
+  "name": "afm-bridge-example-tauri",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "prepare-sidecar": "node scripts/copy-sidecar.mjs",
+    "vite": "vite",
+    "dev": "tauri dev",
+    "build": "tauri build --bundles app",
+    "selftest": "AFM_EXAMPLE_SELFTEST=1 tauri dev"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-shell": "^2.4.0",
+    "afm-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.0",
+    "afm-bridge-darwin-arm64": "workspace:*",
+    "vite": "^8.3.1"
+  }
+}

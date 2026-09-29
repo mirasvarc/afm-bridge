@@ -15,5 +15,8 @@
   "exports": {
     "./package.json": "./package.json",
     "./bin/afm-bridge-server": "./bin/afm-bridge-server"
+  },
+  "scripts": {
+    "prepack": "test -x bin/afm-bridge-server || (echo 'bin/afm-bridge-server missing or not executable: run scripts/build-sidecar.sh' >&2; exit 1)"
   }
 }

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AFM Bridge Tauri Example",
+  "version": "0.1.0",
+  "identifier": "dev.afm-bridge.example.tauri",
+  "build": {
+    "beforeDevCommand": "pnpm prepare-sidecar && pnpm vite",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm prepare-sidecar && pnpm vite build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "label": "main", "title": "afm-bridge Tauri example", "width": 760, "height": 620 }],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns"],
+    "externalBin": ["binaries/afm-bridge-server"],
+    "macOS": {
+      "minimumSystemVersion": "26.0",
+      "hardenedRuntime": true
+    }
+  }
+}

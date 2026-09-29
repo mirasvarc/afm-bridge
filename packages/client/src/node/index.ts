@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from 'node:child_process'
-import { accessSync, constants, readFileSync } from 'node:fs'
+import { accessSync, chmodSync, constants, existsSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { ModelUnavailableError, TransportError } from '../errors.js'
@@ -122,6 +122,15 @@ export function resolveSidecarPath(): string {
     const unpacked = fromPackage.replace(/app\.asar([\\/])/, 'app.asar.unpacked$1')
     if (unpacked !== fromPackage && usable(unpacked)) return unpacked
     if (usable(fromPackage)) return fromPackage
+    // Some package managers drop the executable bit when installing; restore it.
+    if (unpacked === fromPackage && existsSync(fromPackage)) {
+      try {
+        chmodSync(fromPackage, 0o755)
+        if (usable(fromPackage)) return fromPackage
+      } catch {
+        // Read-only location; fall through to the error below.
+      }
+    }
   } catch {
     // Package not installed (not on macOS arm64, or optional dependencies were skipped).
   }

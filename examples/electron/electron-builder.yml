@@ -1,0 +1,24 @@
+appId: dev.afm-bridge.example.electron
+productName: AFM Bridge Example
+directories:
+  output: out/builder
+files:
+  - main.js
+  - preload.cjs
+  - index.html
+  - renderer.js
+  - style.css
+  - package.json
+  # The binary is shipped through extraResources below; keep it out of app.asar.
+  - "!node_modules/afm-bridge-darwin-arm64/**"
+extraResources:
+  # Ends up at AFM Bridge Example.app/Contents/Resources/afm-bridge-server,
+  # where resolveSidecarPath() looks first in a packaged app.
+  - from: node_modules/afm-bridge-darwin-arm64/bin/afm-bridge-server
+    to: afm-bridge-server
+mac:
+  target: dir
+  hardenedRuntime: true
+  entitlements: entitlements.mac.plist
+  entitlementsInherit: entitlements.mac.plist
+  notarize: false

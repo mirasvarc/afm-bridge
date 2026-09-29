@@ -1,3 +1,7 @@
 packages:
   - packages/*
-  - examples/*
+  - examples/node
+  - examples/tauri
+# examples/electron is installed with npm from packed tarballs (scripts/pack-local.sh),
+# like a real app installing afm-bridge from the registry. Electron Forge also does not
+# support pnpm's default node_modules layout.

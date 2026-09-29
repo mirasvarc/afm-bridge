@@ -11,3 +11,6 @@ examples/electron/out/
 .DS_Store
 *.log
 .env*
+examples/electron/vendor/
+examples/electron/package-lock.json
+examples/tauri/dist/

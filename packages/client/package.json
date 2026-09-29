@@ -14,6 +14,10 @@
       "types": "./dist/node/index.d.ts",
       "default": "./dist/node/index.js"
     },
+    "./tauri": {
+      "types": "./dist/tauri/index.d.ts",
+      "default": "./dist/tauri/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -42,8 +46,17 @@
     "afm-bridge-darwin-arm64": "workspace:*"
   },
   "devDependencies": {
+    "@tauri-apps/plugin-shell": "^2.4.0",
     "@types/node": "^26.6.3",
     "typescript": "^7.0.2",
     "vitest": "^5.0.2"
+  },
+  "peerDependencies": {
+    "@tauri-apps/plugin-shell": "^2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@tauri-apps/plugin-shell": {
+      "optional": true
+    }
   }
 }

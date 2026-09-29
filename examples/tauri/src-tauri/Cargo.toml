@@ -1,0 +1,18 @@
+[package]
+name = "afm-bridge-example-tauri"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+# Xcode 27's strip corrupts proc-macro dylibs built for macOS 26+ ("mis-aligned LINKEDIT
+# string pool"), which breaks `tauri build`. Build scripts and proc macros only run at
+# compile time, so leaving them unstripped costs nothing; the app binary is still stripped.
+[profile.release.build-override]
+strip = "none"

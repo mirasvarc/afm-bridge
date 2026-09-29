@@ -2,7 +2,7 @@
   "name": "afm-bridge-monorepo",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10",
+  "packageManager": "pnpm@8.15.4",
   "engines": {
     "node": ">=20"
   },

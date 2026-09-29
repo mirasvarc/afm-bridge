@@ -1,0 +1,24 @@
+{
+  "name": "afm-bridge-example-electron",
+  "private": true,
+  "version": "0.1.0",
+  "description": "afm-bridge example: Electron main process + renderer over IPC",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "AFM_EXAMPLE_SELFTEST=1 electron .",
+    "dist:builder": "electron-builder --mac --dir",
+    "dist:forge": "electron-forge package"
+  },
+  "dependencies": {
+    "afm-bridge": "file:vendor/afm-bridge.tgz",
+    "afm-bridge-darwin-arm64": "file:vendor/afm-bridge-darwin-arm64.tgz"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.15.3"
+  }
+}
