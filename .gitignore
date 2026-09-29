@@ -18,3 +18,5 @@ examples/tauri/dist/
 # Markdown documents in the repository root, except the README
 /*.md
 !/README.md
+packages/client/README.md
+packages/*/LICENSE

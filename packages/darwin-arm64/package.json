@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Prebuilt afm-bridge-server sidecar for macOS on Apple silicon. Installed automatically by afm-bridge.",
   "license": "MIT",
+  "author": "Miroslav Švarc",
+  "homepage": "https://github.com/mirasvarc/afm-bridge#readme",
+  "bugs": "https://github.com/mirasvarc/afm-bridge/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mirasvarc/afm-bridge.git",
+    "directory": "packages/darwin-arm64"
+  },
   "os": [
     "darwin"
   ],
@@ -10,13 +18,14 @@
     "arm64"
   ],
   "files": [
-    "bin/afm-bridge-server"
+    "bin/afm-bridge-server",
+    "LICENSE"
   ],
   "exports": {
     "./package.json": "./package.json",
     "./bin/afm-bridge-server": "./bin/afm-bridge-server"
   },
   "scripts": {
-    "prepack": "test -x bin/afm-bridge-server || (echo 'bin/afm-bridge-server missing or not executable: run scripts/build-sidecar.sh' >&2; exit 1)"
+    "prepack": "test -x bin/afm-bridge-server || (echo 'bin/afm-bridge-server missing or not executable: run scripts/build-sidecar.sh' >&2; exit 1); cp ../../LICENSE ."
   }
 }

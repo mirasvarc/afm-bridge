@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Apple Foundation Models (on-device LLM) for Electron, Tauri and Node via a Swift sidecar",
   "license": "MIT",
+  "author": "Miroslav Švarc",
+  "homepage": "https://github.com/mirasvarc/afm-bridge#readme",
+  "bugs": "https://github.com/mirasvarc/afm-bridge/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mirasvarc/afm-bridge.git",
+    "directory": "packages/client"
+  },
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -27,7 +35,8 @@
   "files": [
     "dist",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "keywords": [
     "apple",
@@ -44,6 +53,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
+    "prepack": "cp ../../README.md ../../LICENSE .",
     "prepublishOnly": "pnpm build"
   },
   "optionalDependencies": {

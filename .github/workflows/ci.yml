@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # macOS 27 + Xcode 27 on Apple silicon (public preview image). The sidecar needs the
+    # macOS 27 SDK. The runner has no Apple Intelligence, so only tests without the live
+    # model run here (integration tests need AFM_INTEGRATION=1 on a real Mac).
+    runs-on: xcode-27
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - uses: pnpm/action-setup@v4 # version from package.json "packageManager"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (Biome + swift format)
+        run: pnpm lint
+
+      - name: Swift unit tests
+        run: swift test --package-path swift
+
+      - name: Build sidecar (release, arm64, hardened runtime, ad hoc signature)
+        run: scripts/build-sidecar.sh
+
+      - name: Build client
+        run: pnpm build
+
+      - name: TypeScript unit tests
+        run: pnpm test
+
+      - name: Pack npm packages and check the binary is executable
+        run: scripts/pack-local.sh
+
+      - name: Check the packed client installs and imports with npm
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir consumer && cd consumer
+          npm init -y > /dev/null
+          npm install "$GITHUB_WORKSPACE/examples/electron/vendor/afm-bridge-darwin-arm64.tgz" "$GITHUB_WORKSPACE/examples/electron/vendor/afm-bridge.tgz"
+          test -x node_modules/afm-bridge-darwin-arm64/bin/afm-bridge-server
+          node --input-type=module -e "
+            import { AppleFoundationModels } from 'afm-bridge'
+            import { resolveSidecarPath } from 'afm-bridge/node'
+            console.log('sidecar:', resolveSidecarPath())
+            console.log(typeof AppleFoundationModels)
+          "
+
+      - name: Sidecar answers the handshake
+        # stdin stays open for a moment: on EOF the sidecar cancels everything and exits
+        # (that is how it avoids orphaned processes), like when its parent dies.
+        run: |
+          (echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}'; sleep 2) \
+            | packages/darwin-arm64/bin/afm-bridge-server | tee handshake.json
+          grep -q '"protocolVersion":1' handshake.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: afm-bridge-packages
+          path: examples/electron/vendor/*.tgz
+          if-no-files-found: error
