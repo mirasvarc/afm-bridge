@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.build/
+.swiftpm/
+*.xcodeproj/
+DerivedData/
+target/
+packages/*/bin/afm-bridge-server
+examples/tauri/src-tauri/binaries/
+examples/electron/out/
+.DS_Store
+*.log
+.env*

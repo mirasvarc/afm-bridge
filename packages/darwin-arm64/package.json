@@ -1,0 +1,19 @@
+{
+  "name": "afm-bridge-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Prebuilt afm-bridge-server sidecar for macOS on Apple silicon. Installed automatically by afm-bridge.",
+  "license": "MIT",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/afm-bridge-server"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    "./bin/afm-bridge-server": "./bin/afm-bridge-server"
+  }
+}

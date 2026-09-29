@@ -1,0 +1,49 @@
+{
+  "name": "afm-bridge",
+  "version": "0.1.0",
+  "description": "Apple Foundation Models (on-device LLM) for Electron, Tauri and Node via a Swift sidecar",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "default": "./dist/node/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "keywords": [
+    "apple",
+    "foundation-models",
+    "apple-intelligence",
+    "llm",
+    "on-device",
+    "electron",
+    "tauri"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm build"
+  },
+  "optionalDependencies": {
+    "afm-bridge-darwin-arm64": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}

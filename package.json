@@ -1,0 +1,21 @@
+{
+  "name": "afm-bridge-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter './packages/**' build",
+    "build:sidecar": "scripts/build-sidecar.sh",
+    "test": "pnpm -r --filter './packages/**' test",
+    "test:swift": "swift test --package-path swift",
+    "test:integration": "AFM_INTEGRATION=1 pnpm -r --filter './packages/**' test",
+    "lint": "biome check . && swift format lint -r swift/Sources swift/Tests swift/Package.swift",
+    "format": "biome check --write . && swift format -i -r swift/Sources swift/Tests swift/Package.swift"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14"
+  }
+}

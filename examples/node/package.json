@@ -1,0 +1,11 @@
+{
+  "name": "afm-bridge-example-node",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node chat.mjs"
+  },
+  "dependencies": {
+    "afm-bridge": "workspace:*"
+  }
+}
